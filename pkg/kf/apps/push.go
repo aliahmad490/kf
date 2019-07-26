@@ -16,6 +16,9 @@ package apps
 
 import (
 	"fmt"
+	"math/rand"
+	"strconv"
+	"strings"
 	"time"
 
 	v1alpha1 "github.com/google/kf/pkg/apis/kf/v1alpha1"
@@ -95,7 +98,7 @@ func (p *pusher) Push(appName string, opts ...PushOption) error {
 		return fmt.Errorf("failed to create app: %s", err)
 	}
 
-	resultingApp, err := p.appsClient.Upsert(app.Namespace, app, mergeApps)
+	resultingApp, err := p.appsClient.Upsert(app.Namespace, app, mergeApps(cfg))
 	if err != nil {
 		return fmt.Errorf("failed to push app: %s", err)
 	}
@@ -122,12 +125,43 @@ func (p *pusher) Push(appName string, opts ...PushOption) error {
 	return nil
 }
 
-func mergeApps(newapp, oldapp *v1alpha1.App) *v1alpha1.App {
-	newapp.ResourceVersion = oldapp.ResourceVersion
-	newEnvs := envutil.GetAppEnvVars(newapp)
-	oldEnvs := envutil.GetAppEnvVars(oldapp)
-	envutil.SetAppEnvVars(newapp, envutil.DeduplicateEnvVars(append(oldEnvs, newEnvs...)))
-	return newapp
+func mergeApps(cfg pushConfig) func(newapp, oldapp *v1alpha1.App) *v1alpha1.App {
+	return func(newapp, oldapp *v1alpha1.App) *v1alpha1.App {
+
+		if len(newapp.Spec.Routes) == 0 {
+			newapp.Spec.Routes = oldapp.Spec.Routes
+		}
+
+		switch {
+		case len(newapp.Spec.Routes) != 0:
+			// Don't overwrite the routes
+		case cfg.DefaultRouteDomain != "":
+			newapp.Spec.Routes = []v1alpha1.RouteSpecFields{
+				{
+					Domain:   cfg.DefaultRouteDomain,
+					Hostname: newapp.Name,
+				},
+			}
+		case cfg.RandomRouteDomain != "":
+			newapp.Spec.Routes = []v1alpha1.RouteSpecFields{
+				{
+					Domain: cfg.RandomRouteDomain,
+					Hostname: strings.Join([]string{
+						newapp.Name,
+						strconv.FormatUint(rand.Uint64(), 36),
+						strconv.FormatUint(uint64(time.Now().UnixNano()), 36),
+					}, "-"),
+				},
+			}
+		}
+
+		newapp.ResourceVersion = oldapp.ResourceVersion
+		newEnvs := envutil.GetAppEnvVars(newapp)
+		oldEnvs := envutil.GetAppEnvVars(oldapp)
+		envutil.SetAppEnvVars(newapp, envutil.DeduplicateEnvVars(append(oldEnvs, newEnvs...)))
+
+		return newapp
+	}
 }
 
 // AppImageName gets the image name for an application.
