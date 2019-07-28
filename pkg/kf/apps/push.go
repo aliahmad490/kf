@@ -98,7 +98,26 @@ func (p *pusher) Push(appName string, opts ...PushOption) error {
 		return fmt.Errorf("failed to create app: %s", err)
 	}
 
-	resultingApp, err := p.appsClient.Upsert(app.Namespace, app, mergeApps(cfg))
+	// Scaling
+	if (cfg.MinScale != nil && cfg.MaxScale != nil) &&
+		(*cfg.MinScale == *cfg.MaxScale) {
+		// Exactly
+		app.Spec.Instances.Exactly = cfg.MinScale
+	} else if !noCfgScaling(cfg) {
+		// Autoscaling or unset
+		app.Spec.Instances.Min = cfg.MinScale
+		app.Spec.Instances.Max = cfg.MaxScale
+	} else {
+		// Default to 1
+		singleInstance := 1
+		app.Spec.Instances.Exactly = &singleInstance
+	}
+
+	resultingApp, err := p.appsClient.Upsert(
+		app.Namespace,
+		app,
+		mergeApps(cfg),
+	)
 	if err != nil {
 		return fmt.Errorf("failed to push app: %s", err)
 	}
@@ -125,9 +144,20 @@ func (p *pusher) Push(appName string, opts ...PushOption) error {
 	return nil
 }
 
+func noCfgScaling(cfg pushConfig) bool {
+	return cfg.MinScale == nil && cfg.MaxScale == nil
+}
+
+func noScaling(app *v1alpha1.App) bool {
+	return app.Spec.Instances.Exactly == nil &&
+		app.Spec.Instances.Min == nil &&
+		app.Spec.Instances.Max == nil
+}
+
 func mergeApps(cfg pushConfig) func(newapp, oldapp *v1alpha1.App) *v1alpha1.App {
 	return func(newapp, oldapp *v1alpha1.App) *v1alpha1.App {
 
+		// Routes
 		if len(newapp.Spec.Routes) == 0 {
 			newapp.Spec.Routes = oldapp.Spec.Routes
 		}
@@ -136,6 +166,7 @@ func mergeApps(cfg pushConfig) func(newapp, oldapp *v1alpha1.App) *v1alpha1.App 
 		case len(newapp.Spec.Routes) != 0:
 			// Don't overwrite the routes
 		case cfg.DefaultRouteDomain != "":
+			// Setup a default route
 			newapp.Spec.Routes = []v1alpha1.RouteSpecFields{
 				{
 					Domain:   cfg.DefaultRouteDomain,
@@ -143,6 +174,7 @@ func mergeApps(cfg pushConfig) func(newapp, oldapp *v1alpha1.App) *v1alpha1.App 
 				},
 			}
 		case cfg.RandomRouteDomain != "":
+			// Setup a random route
 			newapp.Spec.Routes = []v1alpha1.RouteSpecFields{
 				{
 					Domain: cfg.RandomRouteDomain,
@@ -153,6 +185,23 @@ func mergeApps(cfg pushConfig) func(newapp, oldapp *v1alpha1.App) *v1alpha1.App 
 					}, "-"),
 				},
 			}
+		}
+
+		// Scaling overrides
+		if noCfgScaling(cfg) {
+			// Looks like the user did not set a new value, use the old one
+			newapp.Spec.Instances.Exactly = oldapp.Spec.Instances.Exactly
+			newapp.Spec.Instances.Min = oldapp.Spec.Instances.Min
+			newapp.Spec.Instances.Max = oldapp.Spec.Instances.Max
+		}
+
+		// Default scaling
+		if noCfgScaling(cfg) && noScaling(oldapp) {
+			// No scaling in old or new, go with a default of 1. This is to
+			// match expectaions for CF users. See
+			// https://github.com/google/kf/issues/8 for more context.
+			singleInstance := 1
+			newapp.Spec.Instances.Exactly = &singleInstance
 		}
 
 		newapp.ResourceVersion = oldapp.ResourceVersion
